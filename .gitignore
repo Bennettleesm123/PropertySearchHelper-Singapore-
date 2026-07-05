@@ -1,0 +1,28 @@
+# Raw data - large/API-pulled, don't commit
+data/raw/
+
+# Environment / secrets
+.env
+*.key
+config/secrets.json
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Node / frontend
+node_modules/
+frontend/build/
+frontend/dist/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Editor
+.vscode/
