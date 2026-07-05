@@ -25,7 +25,6 @@ def get_onemap_token(email: str, password: str) -> str:
     """
     payload = {"email": email, "password": password}
     response = requests.post(ONEMAP_TOKEN_URL, json=payload)
-
     response.raise_for_status()
     return response.json()["access_token"]
 

@@ -50,6 +50,29 @@ def fetch_ura_transactions(access_key: str, token: str, batch: int = 1) -> dict:
 
     return response.json()
 
+def parse_ura_contract_date(raw_date) -> str:
+    """
+    URA packs contract date as month+year with no separator or leading zero,
+    e.g. '725' = July 2025, '1225' = December 2025, '125' = January 2025.
+    Converts this into a standard 'YYYY-MM' string for proper sorting/filtering.
+    """
+    if raw_date is None:
+        return None
+
+    raw_str = str(raw_date)
+
+    # last 2 digits are always the year, everything before that is the month
+    year_part = raw_str[-2:]
+    month_part = raw_str[:-2]
+
+    # URA uses 2-digit years - assume 2000s since this is post-2015 rolling data
+    full_year = f"20{year_part}"
+
+    # pad month to 2 digits (e.g. '7' becomes '07')
+    month_padded = month_part.zfill(2)
+
+    return f"{full_year}-{month_padded}"  # e.g. "2025-07"
+
 
 def flatten_transactions(raw_json: dict) -> pd.DataFrame:
     """
@@ -64,15 +87,26 @@ def flatten_transactions(raw_json: dict) -> pd.DataFrame:
         market_segment = project_entry.get("marketSegment")  # CCR / RCR / OCR - directly from URA
 
         for txn in project_entry.get("transaction", []):
+            # URA returns area in square meters (sqm), not sqft, despite no unit
+            # label in the raw field name - convert here so downstream PSF
+            # calculations and portal comparisons are correct
+            area_sqm = txn.get("area")
+            area_sqft = None
+            if area_sqm is not None:
+                # 1 sqm = 10.7639 sqft - standard conversion factor
+                area_sqft = round(float(area_sqm) * 10.7639, 1)
+
             rows.append({
                 "project": project_name,
                 "market_segment": market_segment,
-                "district": txn.get("district"),         # now correctly pulled from txn, not project
-                "tenure": txn.get("tenure"),              # now correctly pulled from txn, not project
-                "property_type": txn.get("propertyType"), # now correctly pulled from txn, not project
+                "district": txn.get("district"),
+                "tenure": txn.get("tenure"),
+                "property_type": txn.get("propertyType"),
                 "price": txn.get("price"),
-                "area_sqft": txn.get("area"),
-                "contract_date": txn.get("contractDate"),
+                "area_sqm": area_sqm,       # keep the original raw value too, for transparency/debugging
+                "area_sqft": area_sqft,     # converted value - this is what you'll actually use downstream
+                "contract_date_raw": txn.get("contractDate"),         # original URA encoding, kept for reference
+                "contract_date": parse_ura_contract_date(txn.get("contractDate")),  # parsed, sortable "YYYY-MM"
                 "type_of_sale": txn.get("typeOfSale"),
                 "floor_range": txn.get("floorRange"),
             })
