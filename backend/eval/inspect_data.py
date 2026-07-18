@@ -7,9 +7,13 @@ compare directly against a portal screenshot without misreading raw CSV text.
 """
 
 import pandas as pd
+from pathlib import Path
+
+# anchor to repo root - this file is at backend/eval/, so parents[2] = repo root
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # load with pandas so column names/headers are respected, not guessed
-df = pd.read_csv("data/processed/ccr_resale_transactions.csv")
+df = pd.read_csv(REPO_ROOT / "data" / "processed" / "ccr_resale_transactions.csv")
 
 # print column names and their order - confirms exactly what each column IS
 print("Columns in order:", list(df.columns))

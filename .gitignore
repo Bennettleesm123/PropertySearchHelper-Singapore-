@@ -1,5 +1,7 @@
 # Raw data - large/API-pulled, don't commit
 data/raw/
+#large processed data
+data/processed/
 
 # Environment / secrets
 .env

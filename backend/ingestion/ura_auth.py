@@ -33,21 +33,13 @@ def get_ura_token(access_key: str) -> str:
         "Accept": "application/json",
     }
 
-    # # send the GET request to URA's token endpoint
-    # response = requests.get(URA_TOKEN_URL, headers=headers)
-
-    # # raise an error immediately if the request failed (bad key, network issue, etc.)
-    # response.raise_for_status()
-
-    # # parse the JSON response body
-    # data = response.json()
+    # send the GET request to URA's token endpoint
     response = requests.get(URA_TOKEN_URL, headers=headers)
 
-    # # TEMP DEBUG: see exactly what URA sent back before parsing
-    # print("Status code:", response.status_code)
-    # print("Response text:", response.text)
-
+    # raise immediately if the request failed (bad key, network issue, etc.)
     response.raise_for_status()
+
+    # parse the JSON response body
     data = response.json()
 
     # URA wraps the token inside a "Result" field - pull it out

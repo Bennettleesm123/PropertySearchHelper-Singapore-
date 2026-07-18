@@ -6,16 +6,30 @@ service, filters to resale-only CCR condos, and saves the cleaned
 result to data/processed/.
 """
 
-import requests   # for the API call
-import os         # for reading env vars
-import json       # for saving raw JSON responses
+import sys
+from pathlib import Path
+
+# Makes `from ura_auth import ...` work no matter which folder you run from.
+# This MUST sit above the ura_auth import below, or it won't help.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import requests      # for the API call
+import os            # for reading env vars
 import pandas as pd  # for flattening/filtering the nested transaction data
 
 from ura_auth import get_ura_token  # reuse the token function from Script 1
-from dotenv import load_dotenv  # loads variables from .env into the environment
+from dotenv import load_dotenv      # loads variables from .env into the environment
 
-load_dotenv()  # call this once, before you read any os.environ values below
+load_dotenv()  # call this once, before read any os.environ values below
+
 URA_DATA_URL = "https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1"
+
+# Absolute paths anchored to the repo root, so output always lands in the same
+# place regardless of your working directory.
+# This file is at backend/ingestion/, so: parents[0]=ingestion, [1]=backend, [2]=repo root
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RAW_DIR = REPO_ROOT / "data" / "raw" / "ura_transactions"
+PROCESSED_DIR = REPO_ROOT / "data" / "processed"
 
 def fetch_ura_transactions(access_key: str, token: str, batch: int = 1) -> dict:
     """
@@ -56,22 +70,25 @@ def parse_ura_contract_date(raw_date) -> str:
     e.g. '725' = July 2025, '1225' = December 2025, '125' = January 2025.
     Converts this into a standard 'YYYY-MM' string for proper sorting/filtering.
     """
-    if raw_date is None:
+    if raw_date is None or pd.isna(raw_date):
         return None
 
-    raw_str = str(raw_date)
+    raw_str = str(raw_date).strip()
 
-    # last 2 digits are always the year, everything before that is the month
-    year_part = raw_str[-2:]
-    month_part = raw_str[:-2]
+    # Valid URA encodings are exactly 3 or 4 digits: MYY (e.g. '725') or MMYY ('1225').
+    # Anything else is malformed - return None rather than inventing a date.
+    if not raw_str.isdigit() or len(raw_str) not in (3, 4):
+        return None
+
+    year_part = raw_str[-2:]     # last 2 digits are always the year
+    month_part = raw_str[:-2]    # everything before that is the month
+
+    month = int(month_part)
+    if not 1 <= month <= 12:
+        return None
 
     # URA uses 2-digit years - assume 2000s since this is post-2015 rolling data
-    full_year = f"20{year_part}"
-
-    # pad month to 2 digits (e.g. '7' becomes '07')
-    month_padded = month_part.zfill(2)
-
-    return f"{full_year}-{month_padded}"  # e.g. "2025-07"
+    return f"20{year_part}-{month:02d}"  # e.g. "2025-07"
 
 
 def flatten_transactions(raw_json: dict) -> pd.DataFrame:
@@ -102,6 +119,8 @@ def flatten_transactions(raw_json: dict) -> pd.DataFrame:
                 "district": txn.get("district"),
                 "tenure": txn.get("tenure"),
                 "property_type": txn.get("propertyType"),
+                "no_of_units": txn.get("noOfUnits"),    # >1 means a bulk/multi-unit caveat
+                "type_of_area": txn.get("typeOfArea"),  # 'Strata' vs 'Land' - cross-check on property_type
                 "price": txn.get("price"),
                 "area_sqm": area_sqm,       # keep the original raw value too, for transparency/debugging
                 "area_sqft": area_sqft,     # converted value - this is what you'll actually use downstream
@@ -114,15 +133,41 @@ def flatten_transactions(raw_json: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# Verify these exact strings against your raw pull before trusting them.
+# Run: pd.read_csv(RAW_DIR / "all_transactions_raw.csv")["property_type"].unique()
+CONDO_PROPERTY_TYPES = {"Apartment", "Condominium"}
+
+
 def filter_resale_ccr(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Filters to resale transactions (typeOfSale == '3') within CCR only,
+    Filters to single-unit resale condo/apartment transactions in CCR,
     using URA's own marketSegment field rather than reconstructing
     region from district codes.
+
+    Prints a funnel so you can see exactly what each filter removes.
     """
-    resale_only = df[df["type_of_sale"] == "3"]
-    ccr_only = resale_only[resale_only["market_segment"] == "CCR"]
-    return ccr_only
+    df = df.copy()  # don't mutate the caller's dataframe
+
+    # URA's types come back inconsistently across batches - force the comparison
+    df["type_of_sale"] = df["type_of_sale"].astype(str)
+    df["no_of_units"] = pd.to_numeric(df["no_of_units"], errors="coerce")
+
+    print("\nFilter funnel:")
+    print(f"  start:             {len(df):>7,}")
+
+    df = df[df["type_of_sale"] == "3"]
+    print(f"  after resale:      {len(df):>7,}")
+
+    df = df[df["market_segment"] == "CCR"]
+    print(f"  after CCR:         {len(df):>7,}")
+
+    df = df[df["property_type"].isin(CONDO_PROPERTY_TYPES)]
+    print(f"  after condo-only:  {len(df):>7,}")
+
+    df = df[df["no_of_units"] == 1]
+    print(f"  after single-unit: {len(df):>7,}")
+
+    return df
 
 if __name__ == "__main__":
     access_key = os.environ.get("URA_ACCESS_KEY")
@@ -132,24 +177,38 @@ if __name__ == "__main__":
     # get a fresh token before every run
     token = get_ura_token(access_key)
 
-    # URA splits data into up to 4 batches - pull all of them and combine
+   # URA splits data into up to 4 batches - pull all of them and combine.
+    # One failing batch shouldn't destroy the whole run.
     all_transactions = []
     for batch_num in [1, 2, 3, 4]:
-        raw = fetch_ura_transactions(access_key, token, batch=batch_num)
-        flattened = flatten_transactions(raw)
-        all_transactions.append(flattened)
+        try:
+            raw = fetch_ura_transactions(access_key, token, batch=batch_num)
+            flattened = flatten_transactions(raw)
+            print(f"Batch {batch_num}: {len(flattened):,} transactions")
+            all_transactions.append(flattened)
+        except Exception as e:
+            print(f"Batch {batch_num} FAILED: {e}")
+
+    if not all_transactions:
+        raise RuntimeError("All batches failed - check your token and AccessKey")
 
     # combine all batches into a single dataframe
     combined_df = pd.concat(all_transactions, ignore_index=True)
 
-    # CCR = districts 9, 10, 11 (Downtown Core/Sentosa codes vary by encoding - verify against your sample pull)
     ccr_resale_df = filter_resale_ccr(combined_df)
 
+    # make sure the output folders exist before writing
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
     # save the raw combined pull (untouched) to data/raw
-    combined_df.to_csv("data/raw/ura_transactions/all_transactions_raw.csv", index=False)
+    combined_df.to_csv(RAW_DIR / "all_transactions_raw.csv", index=False)
 
     # save the filtered CCR resale subset to data/processed
-    ccr_resale_df.to_csv("data/processed/ccr_resale_transactions.csv", index=False)
+    ccr_resale_df.to_csv(PROCESSED_DIR / "ccr_resale_transactions.csv", index=False)
 
-    print(f"Pulled {len(combined_df)} total transactions")
-    print(f"Filtered to {len(ccr_resale_df)} CCR resale transactions")
+    # data-quality check: how many contract dates failed to parse?
+    bad_dates = combined_df["contract_date"].isna().sum()
+    print(f"\nPulled {len(combined_df):,} total transactions")
+    print(f"Filtered to {len(ccr_resale_df):,} CCR resale condo transactions")
+    print(f"Unparseable contract dates: {bad_dates:,} ({bad_dates / len(combined_df):.2%})")
