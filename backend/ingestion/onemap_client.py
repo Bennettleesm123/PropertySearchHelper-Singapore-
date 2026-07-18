@@ -46,6 +46,39 @@ def search_address(query: str, token: str) -> dict:
     return response.json()
 
 
+def geocode_project(query: str, token: str) -> dict:
+    """
+    Returns ONE geocoding result with an explicit selection rule and loud
+    warnings, instead of silently trusting results[0].
+
+    Intended to be run ONCE per project, eyeballed by hand, and frozen into
+    the project mapping table. Never call this at scoring time.
+    """
+    data = search_address(query, token)
+    results = data.get("results", [])
+
+    if not results:
+        raise ValueError(f"No geocoding results for {query!r}")
+
+    if data.get("totalNumPages", 1) > 1:
+        print(f"WARNING: {query!r} has multiple result pages - only page 1 was seen")
+
+    if len(results) > 1:
+        print(f"WARNING: {len(results)} results for {query!r}. Using the first. Candidates:")
+        for r in results[:5]:
+            print(f"   - {r.get('SEARCHVAL')} | {r.get('ADDRESS')}")
+
+    top = results[0]
+    return {
+        "query": query,
+        "matched_name": top.get("SEARCHVAL"),
+        "address": top.get("ADDRESS"),
+        "postal": top.get("POSTAL"),
+        "lat": float(top["LATITUDE"]),
+        "lng": float(top["LONGITUDE"]),
+    }
+
+
 if __name__ == "__main__":
     # OPTION A: use the cached token directly from .env (fast, but expires in ~3 days)
     cached_token = os.environ.get("ONEMAP_TOKEN")
@@ -66,5 +99,5 @@ if __name__ == "__main__":
         raise EnvironmentError("No OneMap credentials found in .env")
 
     # test geocoding with a sample CCR project name
-    result = search_address("d'Leedon", token=token)
+    result = geocode_project("d'Leedon", token=token)
     print(result)
